@@ -52,7 +52,12 @@ pub const View = struct {
         return SymbolTable.init(self.buffer[export_table..]);
     }
 
-    // pub fn stringTable(self: View) ?StringTAble {
+    pub fn stringTable(self: View) ?StringTable {
+        const string_table = std.mem.readIntLittle(u32, self.buffer[12..16]);
+        if (string_table == 0)
+            return null;
+        return StringTable.init(self.buffer[string_table..]);
+    }
 };
 
 pub const SymbolTable = struct {
@@ -78,27 +83,69 @@ pub const SymbolTable = struct {
         };
     }
 
-    pub fn iterator(self: SymbolTable) SymbolIterator {
-        return SymbolIterator{ .table = self };
+    pub fn iterator(self: SymbolTable) Iterator {
+        return Iterator{ .table = self };
     }
-};
 
-pub const SymbolIterator = struct {
-    table: SymbolTable,
-    index: usize = 0,
+    pub const Iterator = struct {
+        table: SymbolTable,
+        index: usize = 0,
 
-    pub fn next(self: *SymbolIterator) ?Symbol {
-        if (self.index >= self.table.count)
-            return null;
-        const index = self.index;
-        self.index += 1;
-        return self.table.get(index);
-    }
+        pub fn next(self: *Iterator) ?Symbol {
+            if (self.index >= self.table.count)
+                return null;
+            const index = self.index;
+            self.index += 1;
+            return self.table.get(index);
+        }
+    };
 };
 
 pub const Symbol = struct {
     offset: u32,
     symbol_name: u32,
+};
+
+pub const StringTable = struct {
+    buffer: []const u8,
+    limit: usize,
+
+    pub fn init(buffer: []const u8) SymbolTable {
+        const limit = std.mem.readIntLittle(u32, buffer[0..4]);
+        return SymbolTable{
+            .limit = limit,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn iterator(self: StringTable) Iterator {
+        return Iterator{ .table = self };
+    }
+
+    pub const Iterator = struct {
+        table: StringTable,
+        offset: usize = 0,
+
+        pub fn next(self: *Iterator) ?String {
+            if (self.offset >= self.table.count)
+                return null;
+            const offset = self.offset;
+            const length = std.mem.readIntLittle(u32, self.table.buffer[offset..][0..4]);
+
+            self.offset += length;
+            self.offset += 1;
+
+            return String{
+                .offset = offset,
+                .text = self.table.buffer[offset + 4 ..][0..length],
+            };
+        }
+    };
+};
+
+pub const String = struct {
+    offset: u32,
+    text: []const u8,
 };
 
 fn hexToBits(comptime str: []const u8) *const [str.len / 2]u8 {
@@ -186,4 +233,8 @@ test "parse import table" {
     try std.testing.expectEqual(@as(?Symbol, sym_2), iter.next());
     try std.testing.expectEqual(@as(?Symbol, sym_3), iter.next());
     try std.testing.expectEqual(@as(?Symbol, null), iter.next());
+}
+
+test "parse string table" {
+    @panic("TODO: test not implemented yet");
 }
