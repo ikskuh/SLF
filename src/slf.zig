@@ -27,10 +27,55 @@ pub const View = struct {
         const section_size = std.mem.readIntLittle(u32, buffer[20..24]);
         const symbol_size = std.mem.readIntLittle(u8, buffer[24..25]);
 
+        // validate basic boundaries
         if (export_table >= buffer.len - 4) return error.InvalidData;
         if (import_table >= buffer.len - 4) return error.InvalidData;
         if (string_table >= buffer.len - 4) return error.InvalidData;
         if (section_start + section_size >= buffer.len) return error.InvalidData;
+
+        const string_table_size = if (string_table != 0) blk: {
+            const length = std.mem.readIntLittle(u32, buffer[string_table..][0..4]);
+            if (string_table + length > buffer.len) return error.InvalidData;
+
+            var offset: u32 = 4;
+            while (offset < length) {
+                const len = std.mem.readIntLittle(u32, buffer[string_table + offset ..][0..4]);
+                // std.debug.print("{} + {} + 5 > {}\n", .{
+                //     offset, len, length,
+                // });
+                if (offset + len + 5 > length) return error.InvalidData;
+                if (string_table + len + 1 > buffer.len) return error.InvalidData;
+                if (buffer[string_table + offset + len + 4] != 0) return error.InvalidData;
+                offset += 5 + len;
+            }
+            break :blk length;
+        } else 0;
+
+        if (export_table != 0) {
+            const count = std.mem.readIntLittle(u32, buffer[export_table..][0..4]);
+            if (export_table + 8 * count + 4 > buffer.len) return error.InvalidData;
+
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const name_index = std.mem.readIntLittle(u32, buffer[export_table + 4 + 8 * i ..][0..4]);
+                const offset = std.mem.readIntLittle(u32, buffer[export_table + 4 + 8 * i ..][4..8]);
+                if (name_index + 5 > string_table_size) return error.InvalidData; // not possible for string table
+                if (offset + symbol_size > section_size) return error.InvalidData; // out of bounds
+            }
+        }
+
+        if (import_table != 0) {
+            const count = std.mem.readIntLittle(u32, buffer[import_table..][0..4]);
+            if (import_table + 8 * count + 4 > buffer.len) return error.InvalidData;
+
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const name_index = std.mem.readIntLittle(u32, buffer[import_table + 4 + 8 * i ..][0..4]);
+                const offset = std.mem.readIntLittle(u32, buffer[import_table + 4 + 8 * i ..][4..8]);
+                if (name_index + 5 > string_table_size) return error.InvalidData; // not possible for string table
+                if (offset + symbol_size > section_size) return error.InvalidData; // out of bounds
+            }
+        }
 
         return View{
             .buffer = buffer,
@@ -52,7 +97,7 @@ pub const View = struct {
         return SymbolTable.init(self.buffer[export_table..]);
     }
 
-    pub fn stringTable(self: View) ?StringTable {
+    pub fn strings(self: View) ?StringTable {
         const string_table = std.mem.readIntLittle(u32, self.buffer[12..16]);
         if (string_table == 0)
             return null;
@@ -108,11 +153,11 @@ pub const Symbol = struct {
 
 pub const StringTable = struct {
     buffer: []const u8,
-    limit: usize,
+    limit: u32,
 
-    pub fn init(buffer: []const u8) SymbolTable {
+    pub fn init(buffer: []const u8) StringTable {
         const limit = std.mem.readIntLittle(u32, buffer[0..4]);
-        return SymbolTable{
+        return StringTable{
             .limit = limit,
             .buffer = buffer,
         };
@@ -122,36 +167,43 @@ pub const StringTable = struct {
         return Iterator{ .table = self };
     }
 
+    pub fn get(self: StringTable, offset: u32) String {
+        const length = std.mem.readIntLittle(u32, self.buffer[offset..][0..4]);
+
+        return String{
+            .offset = @truncate(u32, offset),
+            .text = self.buffer[offset + 4 ..][0..length :0],
+        };
+    }
+
     pub const Iterator = struct {
         table: StringTable,
-        offset: usize = 0,
+        offset: u32 = 4, // we start *after* the table length marker
 
         pub fn next(self: *Iterator) ?String {
-            if (self.offset >= self.table.count)
+            if (self.offset >= self.table.limit)
                 return null;
-            const offset = self.offset;
-            const length = std.mem.readIntLittle(u32, self.table.buffer[offset..][0..4]);
 
-            self.offset += length;
-            self.offset += 1;
+            const string = self.table.get(self.offset);
 
-            return String{
-                .offset = offset,
-                .text = self.table.buffer[offset + 4 ..][0..length],
-            };
+            self.offset += 4; // skip length
+            self.offset += @truncate(u32, string.text.len);
+            self.offset += 1; // skip zero terminator
+
+            return string;
         }
     };
 };
 
 pub const String = struct {
     offset: u32,
-    text: []const u8,
+    text: [:0]const u8,
 };
 
 fn hexToBits(comptime str: []const u8) *const [str.len / 2]u8 {
     comptime {
         comptime var res: [str.len / 2]u8 = undefined;
-        @setEvalBranchQuota(str.len);
+        @setEvalBranchQuota(8 * str.len);
 
         inline for (res) |*c, i| {
             c.* = std.fmt.parseInt(u8, str[2 * i ..][0..2], 16) catch unreachable;
@@ -165,6 +217,7 @@ test "parse empty, but valid file" {
 }
 
 test "parse invalid header" {
+    // Header too short:
     try std.testing.expectError(error.InvalidHeader, View.init(hexToBits("")));
     try std.testing.expectError(error.InvalidHeader, View.init(hexToBits("f2adb602")));
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602")));
@@ -173,6 +226,8 @@ test "parse invalid header" {
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000000000000000000000")));
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000000000000000000000")));
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000000000000000000000")));
+
+    // invalid/out of bounds header fields:
 
     //                                                                          EEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602190000000000000000000000000000000000000002000000")));
@@ -185,11 +240,40 @@ test "parse invalid header" {
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000000000000000000000000000000000000005000000")));
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000000000000000000000000000000000000007000000")));
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000000000000000000000000000000000000009000000")));
+
+    // out of bounds table size:
+
+    // import table
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6021C00000000000000000000000000000000000000020000000300000001000000020000000300000004000000050000000600000")));
+
+    // export table
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000001C000000000000000000000000000000020000000300000001000000020000000300000004000000050000000600000")));
+
+    // string table
+    //                                                                  MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A6967206973206772656174210"))); // too short
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0105000000576F726C64000D0000005A69672069732067726561742100"))); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64020D0000005A69672069732067726561742100"))); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742103"))); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000E0000005A6967206973206772656174210000000000000000"))); // item out of table
+}
+
+test "parse string table" {
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
+    const view = try View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742100"));
+
+    const table = view.strings() orelse return error.MissingTable;
+
+    var iter = table.iterator();
+    try std.testing.expectEqualStrings("Hello", (iter.next() orelse return error.UnexpectedNull).text);
+    try std.testing.expectEqualStrings("World", (iter.next() orelse return error.UnexpectedNull).text);
+    try std.testing.expectEqualStrings("Zig is great!", (iter.next() orelse return error.UnexpectedNull).text);
+    try std.testing.expectEqual(@as(?String, null), iter.next());
 }
 
 test "parse export table" {
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3
-    const view = try View.init(hexToBits("fbadb6021C000000000000000000000000000000000000000200000003000000010000000200000003000000040000000500000006000000"));
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
+    const view = try View.init(hexToBits("fbadb6021C000000000000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"));
 
     const sym_1 = Symbol{ .symbol_name = 1, .offset = 2 };
     const sym_2 = Symbol{ .symbol_name = 3, .offset = 4 };
@@ -212,8 +296,8 @@ test "parse export table" {
 }
 
 test "parse import table" {
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3
-    const view = try View.init(hexToBits("fbadb602000000001C0000000000000000000000000000000200000003000000010000000200000003000000040000000500000006000000"));
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
+    const view = try View.init(hexToBits("fbadb602000000001C0000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"));
 
     const sym_1 = Symbol{ .symbol_name = 1, .offset = 2 };
     const sym_2 = Symbol{ .symbol_name = 3, .offset = 4 };
@@ -233,8 +317,4 @@ test "parse import table" {
     try std.testing.expectEqual(@as(?Symbol, sym_2), iter.next());
     try std.testing.expectEqual(@as(?Symbol, sym_3), iter.next());
     try std.testing.expectEqual(@as(?Symbol, null), iter.next());
-}
-
-test "parse string table" {
-    @panic("TODO: test not implemented yet");
 }
