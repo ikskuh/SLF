@@ -91,7 +91,7 @@ pub const Linker = struct {
                     if (symbol_table.get(string.text)) |address| {
                         // we got that!
                         try output.seekTo(symbol_offset);
-                        try patchStream(output, symbol_size, address);
+                        try patchStream(output, symbol_size, address, .replace);
 
                         std.log.debug("Directly resolving symbol {s} to {X:0>4} at offset {X:0>4}", .{ string.text, address, symbol_offset });
                     } else {
@@ -125,7 +125,7 @@ pub const Linker = struct {
 
                     if (symbol_table.get(patch.symbol)) |address| {
                         try output.seekTo(patch.offset);
-                        try patchStream(output, symbol_size, address);
+                        try patchStream(output, symbol_size, address, .replace);
 
                         std.log.debug("Patch-resolving symbol {s} to {X:0>4} at offset {X:0>4}", .{ patch.symbol, address, patch.offset });
 
@@ -134,6 +134,15 @@ pub const Linker = struct {
                     } else {
                         i += 1;
                     }
+                }
+            }
+
+            // then resolve all internal references
+            if (module.view.relocations()) |relocs| {
+                var i: u32 = 0;
+                while (i < relocs.count) : (i += 1) {
+                    try output.seekTo(module.base_offset + relocs.get(i));
+                    try patchStream(output, symbol_size, module.base_offset, .add);
                 }
             }
         }
@@ -156,18 +165,45 @@ pub const Linker = struct {
         }
     }
 
-    fn patchStream(stream: *std.io.StreamSource, size: SymbolSize, data: u64) !void {
+    const PatchMode = enum { replace, add };
+    fn patchStream(stream: *std.io.StreamSource, size: SymbolSize, data: u64, kind: PatchMode) !void {
         switch (size) {
-            .@"8 bits" => try stream.writer().writeIntLittle(u8, try std.math.cast(u8, data)),
-            .@"16 bits" => try stream.writer().writeIntLittle(u16, try std.math.cast(u16, data)),
-            .@"32 bits" => try stream.writer().writeIntLittle(u32, try std.math.cast(u32, data)),
-            .@"64 bits" => try stream.writer().writeIntLittle(u64, try std.math.cast(u64, data)),
+            .@"8 bits" => try patchStreamTyped(u8, stream, data, kind),
+            .@"16 bits" => try patchStreamTyped(u16, stream, data, kind),
+            .@"32 bits" => try patchStreamTyped(u32, stream, data, kind),
+            .@"64 bits" => try patchStreamTyped(u64, stream, data, kind),
         }
+    }
+
+    fn patchStreamTyped(comptime Offset: type, stream: *std.io.StreamSource, data: u64, kind: PatchMode) !void {
+        const pos = try stream.getPos();
+
+        const old_val = try stream.reader().readIntLittle(Offset);
+        const new_val = try std.math.cast(Offset, data);
+
+        const value = switch (kind) {
+            .replace => new_val,
+            .add => old_val +% new_val,
+        };
+
+        try stream.seekTo(pos);
+        try stream.writer().writeIntLittle(Offset, value);
     }
 };
 
 /// A view of a SLF file. Allows accessing the data structure from a flat buffer without allocation.
 pub const View = struct {
+    const offsets = struct {
+        const magic = 0;
+        const export_table = 4;
+        const import_table = 8;
+        const relocs_table = 12;
+        const string_table = 16;
+        const section_start = 20;
+        const section_size = 24;
+        const symbol_size = 28;
+    };
+
     buffer: []const u8,
 
     symbol_size: SymbolSize,
@@ -180,18 +216,20 @@ pub const View = struct {
     pub fn init(buffer: []const u8, options: InitOptions) InitError!View {
         if (!std.mem.startsWith(u8, buffer, &magic_number))
             return error.InvalidHeader;
-        if (buffer.len < 28) return error.InvalidData;
+        if (buffer.len < 32) return error.InvalidData;
 
-        const export_table = std.mem.readIntLittle(u32, buffer[4..8]);
-        const import_table = std.mem.readIntLittle(u32, buffer[8..12]);
-        const string_table = std.mem.readIntLittle(u32, buffer[12..16]);
-        const section_start = std.mem.readIntLittle(u32, buffer[16..20]);
-        const section_size = std.mem.readIntLittle(u32, buffer[20..24]);
-        const symbol_size = std.mem.readIntLittle(u8, buffer[24..25]);
+        const export_table = std.mem.readIntLittle(u32, buffer[offsets.export_table..][0..4]);
+        const import_table = std.mem.readIntLittle(u32, buffer[offsets.import_table..][0..4]);
+        const relocs_table = std.mem.readIntLittle(u32, buffer[offsets.relocs_table..][0..4]);
+        const string_table = std.mem.readIntLittle(u32, buffer[offsets.string_table..][0..4]);
+        const section_start = std.mem.readIntLittle(u32, buffer[offsets.section_start..][0..4]);
+        const section_size = std.mem.readIntLittle(u32, buffer[offsets.section_size..][0..4]);
+        const symbol_size = std.mem.readIntLittle(u8, buffer[offsets.symbol_size..][0..1]);
 
         // validate basic boundaries
         if (export_table >= buffer.len - 4) return error.InvalidData;
         if (import_table >= buffer.len - 4) return error.InvalidData;
+        if (relocs_table >= buffer.len - 4) return error.InvalidData;
         if (string_table >= buffer.len - 4) return error.InvalidData;
         if (section_start + section_size > buffer.len) return error.InvalidData;
 
@@ -243,6 +281,18 @@ pub const View = struct {
             }
         }
 
+        if (relocs_table != 0) {
+            const count = std.mem.readIntLittle(u32, buffer[relocs_table..][0..4]);
+            if (relocs_table + 4 * count + 4 > buffer.len) return error.InvalidData;
+
+            var i: u32 = 0;
+            while (i < count) : (i += 1) {
+                const offset = std.mem.readIntLittle(u32, buffer[relocs_table + 4 + 4 * i ..][0..4]);
+                std.debug.print("{} + {} > {}\n", .{ offset, symbol_size, section_size });
+                if (offset + symbol_size > section_size) return error.InvalidData; // out of bounds
+            }
+        }
+
         return View{
             .buffer = buffer,
             .symbol_size = std.meta.intToEnum(SymbolSize, symbol_size) catch return error.InvalidData,
@@ -250,29 +300,36 @@ pub const View = struct {
     }
 
     pub fn imports(self: View) ?SymbolTable {
-        const import_table = std.mem.readIntLittle(u32, self.buffer[8..12]);
+        const import_table = std.mem.readIntLittle(u32, self.buffer[offsets.import_table..][0..4]);
         if (import_table == 0)
             return null;
         return SymbolTable.init(self.buffer[import_table..]);
     }
 
     pub fn exports(self: View) ?SymbolTable {
-        const export_table = std.mem.readIntLittle(u32, self.buffer[4..8]);
+        const export_table = std.mem.readIntLittle(u32, self.buffer[offsets.export_table..][0..4]);
         if (export_table == 0)
             return null;
         return SymbolTable.init(self.buffer[export_table..]);
     }
 
     pub fn strings(self: View) ?StringTable {
-        const string_table = std.mem.readIntLittle(u32, self.buffer[12..16]);
+        const string_table = std.mem.readIntLittle(u32, self.buffer[offsets.string_table..][0..4]);
         if (string_table == 0)
             return null;
         return StringTable.init(self.buffer[string_table..]);
     }
 
+    pub fn relocations(self: View) ?RelocationTable {
+        const relocs_table = std.mem.readIntLittle(u32, self.buffer[offsets.relocs_table..][0..4]);
+        if (relocs_table == 0)
+            return null;
+        return RelocationTable.init(self.buffer[relocs_table..]);
+    }
+
     pub fn data(self: View) []const u8 {
-        const section_start = std.mem.readIntLittle(u32, self.buffer[16..20]);
-        const section_size = std.mem.readIntLittle(u32, self.buffer[20..24]);
+        const section_start = std.mem.readIntLittle(u32, self.buffer[offsets.section_start..][0..4]);
+        const section_size = std.mem.readIntLittle(u32, self.buffer[offsets.section_size..][0..4]);
 
         return self.buffer[section_start..][0..section_size];
     }
@@ -322,6 +379,24 @@ pub const SymbolTable = struct {
 pub const Symbol = struct {
     offset: u32,
     symbol_name: u32,
+};
+
+pub const RelocationTable = struct {
+    buffer: []const u8,
+    count: u32,
+
+    pub fn init(buffer: []const u8) RelocationTable {
+        const count = std.mem.readIntLittle(u32, buffer[0..4]);
+        return RelocationTable{
+            .count = count,
+            .buffer = buffer,
+        };
+    }
+
+    pub fn get(self: RelocationTable, index: u32) u32 {
+        std.debug.assert(index < self.count);
+        return std.mem.readIntLittle(u32, self.buffer[index + 4 ..][0..4]);
+    }
 };
 
 pub const StringTable = struct {
@@ -386,7 +461,7 @@ fn hexToBits(comptime str: []const u8) *const [str.len / 2]u8 {
 }
 
 test "parse empty, but valid file" {
-    _ = try View.init(hexToBits("fbadb602000000000000000000000000000000000000000002000000"), .{});
+    _ = try View.init(hexToBits("fbadb60200000000000000000000000000000000000000000000000002000000"), .{});
 }
 
 test "parse invalid header" {
@@ -423,17 +498,17 @@ test "parse invalid header" {
     try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb602000000001C000000000000000000000000000000020000000300000001000000020000000300000004000000050000000600000"), .{ .validate_symbols = true }));
 
     // string table
-    //                                                                  MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
-    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A6967206973206772656174210"), .{})); // too short
-    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0105000000576F726C64000D0000005A69672069732067726561742100"), .{})); // non-null item
-    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64020D0000005A69672069732067726561742100"), .{})); // non-null item
-    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742103"), .{})); // non-null item
-    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000E0000005A6967206973206772656174210000000000000000"), .{})); // item out of table
+    //                                                                  MMMMMMMMEEEEEEEERRRRRRRRIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A6967206973206772656174210"), .{})); // too short
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0105000000576F726C64000D0000005A69672069732067726561742100"), .{})); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64020D0000005A69672069732067726561742100"), .{})); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742103"), .{})); // non-null item
+    try std.testing.expectError(error.InvalidData, View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000E0000005A6967206973206772656174210000000000000000"), .{})); // item out of table
 }
 
 test "parse string table" {
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
-    const view = try View.init(hexToBits("fbadb60200000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742100"), .{});
+    //                                    MMMMMMMMEEEEEEEERRRRRRRRIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLllllllllH e l l o ZZllllllllW o r l d ZZllllllllZ i g   i s   g r e a t ! ZZ
+    const view = try View.init(hexToBits("fbadb6020000000000000000000000001C0000000000000000000000020000002A0000000500000048656C6C6F0005000000576F726C64000D0000005A69672069732067726561742100"), .{});
 
     const table = view.strings() orelse return error.MissingTable;
 
@@ -445,8 +520,8 @@ test "parse string table" {
 }
 
 test "parse export table" {
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
-    const view = try View.init(hexToBits("fbadb6021C000000000000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"), .{});
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIIRRRRRRRRSSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
+    const view = try View.init(hexToBits("fbadb6021C00000000000000000000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"), .{});
 
     const sym_1 = Symbol{ .symbol_name = 1, .offset = 2 };
     const sym_2 = Symbol{ .symbol_name = 3, .offset = 4 };
@@ -469,8 +544,8 @@ test "parse export table" {
 }
 
 test "parse import table" {
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIISSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
-    const view = try View.init(hexToBits("fbadb602000000001C0000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"), .{});
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIIRRRRRRRRSSSSSSSSssssssssllllllllBB______LLLLLLLLNNNNNNN1OOOOOOO1NNNNNNN2OOOOOOO2NNNNNNN3OOOOOOO3LLLLLLLLllllllll..........................ZZ
+    const view = try View.init(hexToBits("fbadb602000000001C000000000000003800000000000000080000000200000003000000010000000200000003000000040000000500000006000000160000000D000000FFFFFFFFFFFFFFFFFFFFFFFFFF00"), .{});
 
     const sym_1 = Symbol{ .symbol_name = 1, .offset = 2 };
     const sym_2 = Symbol{ .symbol_name = 3, .offset = 4 };

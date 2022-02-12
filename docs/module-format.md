@@ -14,6 +14,7 @@ All integers are in little endian, there is no automatic padding between fields.
 magic: [4]u8 = .{ 0xFB, 0xAD, 0xB6, 0x02 },
 export_table:  u32,
 import_table:  u32,
+relocs_table:  u32,
 string_table:  u32,
 section_start: u32,
 section_size:  u32,
@@ -23,6 +24,7 @@ padding:       [3]u8,
 
 - `export_table`: The byte offset into the file where the exports are listed. If `0`, no export table exists.
 - `import_table`: The byte offset into the file where the imports are listed. If `0`, no import table exists.
+- `relocs_table`: The byte offset into the file where the relocations are listed. If `0`, no relocation table exists.
 - `string_table`: The byte offset into the file where the string table is located. If `0`, no string table exists. Must be present, if either `export_table` or `import_table` exists.
 - `section_start`: The byte offset into the file where the memory section starts. All section offsets are relative to this offset.
 - `section_size`: The number of bytes in the memory section.
@@ -42,6 +44,15 @@ entries: [count]struct {
   symbol_name: u32, // offset into the string table
   offset:      u32, // offset into the section where the symbol is located/referenced
 },
+```
+
+### Relocation Table
+
+Each entry in the relocation table is an offset into the section data. On each offset, a pointer value is located that stores the offset to the start of the section. The relocation is then performed by adding the section base offset to the already stored value.
+
+```zig
+count: u32,
+entries: [count]u32,
 ```
 
 ### String Table

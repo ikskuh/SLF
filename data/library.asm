@@ -11,7 +11,10 @@ str_strcpy: string 'strcpy'
 str_interrupts: string 'interrupts'
 stringtable_end strings
 
+relocs_start relocs
+relocs_end relocs
 
+ALIGN 16
 data:
 
 strcpy_def:

@@ -11,7 +11,10 @@ str_reset: string 'reset'
 str_interrupts: string 'interrupts'
 stringtable_end strings
 
+relocs_start relocs
+relocs_end relocs
 
+ALIGN 16
 data:
 
 lbl_interrupts:
