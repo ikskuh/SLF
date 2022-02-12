@@ -42,13 +42,14 @@ pub const Linker = struct {
     pub const LinkOptions = struct {
         module_alignment: u32 = 16,
         symbol_size: ?SymbolSize = null,
+        base_address: u32 = 0,
     };
     pub fn link(self: *Linker, output: *std.io.StreamSource, options: LinkOptions) !void {
         if (self.modules.items.len == 0)
             return error.NothingToLink;
 
         var symbol_size: SymbolSize = options.symbol_size orelse self.modules.items[0].view.symbol_size;
-        var write_offset: u32 = 0;
+        var write_offset: u32 = options.base_address;
         for (self.modules.items) |*_module| {
             const module: *Module = _module;
 
