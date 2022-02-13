@@ -227,6 +227,16 @@ pub const View = struct {
         const section_size = std.mem.readIntLittle(u32, buffer[offsets.section_size..][0..4]);
         const symbol_size = std.mem.readIntLittle(u8, buffer[offsets.symbol_size..][0..1]);
 
+        // std.debug.print("{} {} {} {} {} {} {}\n", .{
+        //     export_table,
+        //     import_table,
+        //     relocs_table,
+        //     string_table,
+        //     section_start,
+        //     section_size,
+        //     symbol_size,
+        // });
+
         // validate basic boundaries
         if (export_table >= buffer.len - 4) return error.InvalidData;
         if (import_table >= buffer.len - 4) return error.InvalidData;
@@ -289,7 +299,9 @@ pub const View = struct {
             var i: u32 = 0;
             while (i < count) : (i += 1) {
                 const offset = std.mem.readIntLittle(u32, buffer[relocs_table + 4 + 4 * i ..][0..4]);
-                std.debug.print("{} + {} > {}\n", .{ offset, symbol_size, section_size });
+                // std.debug.print("{} + {} > {}\n", .{ offset, symbol_size, section_size });
+
+                // relocation must always be inside the section table
                 if (offset + symbol_size > section_size) return error.InvalidData; // out of bounds
             }
         }
@@ -390,14 +402,32 @@ pub const RelocationTable = struct {
         const count = std.mem.readIntLittle(u32, buffer[0..4]);
         return RelocationTable{
             .count = count,
-            .buffer = buffer,
+            .buffer = buffer[4..],
         };
     }
 
     pub fn get(self: RelocationTable, index: u32) u32 {
         std.debug.assert(index < self.count);
-        return std.mem.readIntLittle(u32, self.buffer[index + 4 ..][0..4]);
+        return std.mem.readIntLittle(u32, self.buffer[4 * index ..][0..4]);
     }
+
+    pub fn iterator(self: RelocationTable) Iterator {
+        return Iterator{ .table = self };
+    }
+
+    pub const Iterator = struct {
+        table: RelocationTable,
+        index: u32 = 0,
+
+        pub fn next(self: *Iterator) ?u32 {
+            if (self.index >= self.table.count) {
+                return null;
+            }
+            const value = self.table.get(self.index);
+            self.index += 1;
+            return value;
+        }
+    };
 };
 
 pub const StringTable = struct {
@@ -566,4 +596,20 @@ test "parse import table" {
     try std.testing.expectEqual(@as(?Symbol, sym_2), iter.next());
     try std.testing.expectEqual(@as(?Symbol, sym_3), iter.next());
     try std.testing.expectEqual(@as(?Symbol, null), iter.next());
+}
+
+test "parse relocation table" {
+    // we overlap relocations and sections here as it doesn't do any harm
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIIRRRRRRRRSSSSSSSSssssssssllllllllBB______LLLLLLLLaaaaaaaabbbbbbbb
+    const view = try View.init(hexToBits("fbadb60200000000000000002000000000000000200000000C00000002000000020000000400000005000000"), .{});
+
+    const table = view.relocations() orelse return error.MissingTable;
+
+    try std.testing.expectEqual(@as(u32, 4), table.get(0));
+    try std.testing.expectEqual(@as(u32, 5), table.get(1));
+
+    var iter = table.iterator();
+    try std.testing.expectEqual(@as(?u32, 4), iter.next());
+    try std.testing.expectEqual(@as(?u32, 5), iter.next());
+    try std.testing.expectEqual(@as(?u32, null), iter.next());
 }
