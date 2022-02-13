@@ -40,6 +40,7 @@ pub fn main() !u8 {
         try printUsage(stdout);
         return 0;
     }
+
     if (args.positionals.len == 0) {
         try printUsage(stderr);
         return 1;
