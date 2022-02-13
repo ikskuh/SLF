@@ -192,6 +192,179 @@ pub const Linker = struct {
     }
 };
 
+pub const Builder = struct {
+    arena: std.heap.ArenaAllocator,
+    allocator: std.mem.Allocator,
+
+    stream: *std.io.StreamSource,
+
+    exports: std.StringHashMapUnmanaged(u32) = .{},
+    imports: std.StringHashMapUnmanaged(u32) = .{},
+    strings: std.StringHashMapUnmanaged(u32) = .{},
+    relocs: std.ArrayListUnmanaged(u32) = .{},
+
+    pub fn init(allocator: std.mem.Allocator, symbol_size: SymbolSize, stream: *std.io.StreamSource) !Builder {
+        var builder = Builder{
+            .allocator = allocator,
+            .arena = std.heap.ArenaAllocator.init(allocator),
+            .stream = stream,
+        };
+
+        try builder.stream.writer().writeAll(&[_]u8{
+            0xFB, 0xAD, 0xB6, 0x02, // magic
+            0xAA, 0xAA, 0xAA, 0xAA, // export_table
+            0xAA, 0xAA, 0xAA, 0xAA, // import_table
+            0xAA, 0xAA, 0xAA, 0xAA, // relocs_table
+            0xAA, 0xAA, 0xAA, 0xAA, // string_table
+            0x20, 0x00, 0x00, 0x00, // section_start
+            0xAA, 0xAA, 0xAA, 0xAA, // section_size
+            @enumToInt(symbol_size), // symbol_size
+            0x00, 0x00, 0x00, // padding
+        });
+
+        return builder;
+    }
+
+    pub fn deinit(self: *Builder) void {
+        self.exports.deinit(self.allocator);
+        self.imports.deinit(self.allocator);
+        self.strings.deinit(self.allocator);
+        self.arena.deinit();
+        self.* = undefined;
+    }
+
+    /// Returns the current offset into the data section.
+    pub fn getOffset(self: *Builder) !u32 {
+        return try self.stream.getPos() - 0x20;
+    }
+
+    /// Appends bytes to the data section.
+    pub fn append(self: *Builder, data: []const u8) !void {
+        try self.stream.writer().writeAll(data);
+    }
+
+    /// If `offset` is null, the current offset is used.
+    pub fn addExport(self: *Builder, name: []const u8, offset: ?u32) !void {
+        const real_offset = offset orelse try self.stream.getPos();
+        const interned_name = try self.internString(name);
+
+        try self.exports.put(self.allocator, interned_name, real_offset);
+    }
+
+    /// If `offset` is null, the current offset is used.
+    pub fn addImport(self: *Builder, name: []const u8, offset: ?u32) !void {
+        const real_offset = offset orelse try self.stream.getPos();
+        const interned_name = try self.internString(name);
+
+        try self.imports.put(self.allocator, interned_name, real_offset);
+    }
+
+    /// If `offset` is null, the current offset is used.
+    pub fn addRelocation(self: *Builder, offset: ?u32) !void {
+        const real_offset = offset orelse try self.stream.getPos();
+        try self.relocs.append(self.allocator, real_offset);
+    }
+
+    pub fn finalize(self: *Builder) !void {
+        var writer = self.stream.writer();
+
+        const data_end_marker = try self.stream.getPos();
+
+        const string_table_pos = try self.alignData(4);
+        {
+            var total_size: u32 = 4;
+            var iter = self.strings.iterator();
+            while (iter.next()) |kv| {
+                total_size += @truncate(u32, kv.key_ptr.len) + 5; // 4 byte length + nul terminator
+            }
+
+            try writer.writeIntLittle(u32, total_size);
+
+            var offset: u32 = 4;
+            iter = self.strings.iterator();
+            while (iter.next()) |kv| {
+                kv.value_ptr.* = offset;
+                try writer.writeIntLittle(u32, @truncate(u32, kv.key_ptr.len));
+                try writer.writeAll(kv.key_ptr.*);
+                try writer.writeByte(0);
+                offset += @truncate(u32, kv.key_ptr.len) + 5;
+            }
+        }
+
+        const export_table_pos = try self.alignData(4);
+        {
+            try writer.writeIntLittle(u32, self.exports.count());
+            var iter = self.exports.iterator();
+            while (iter.next()) |sym| {
+                const name_str = sym.key_ptr.*;
+                const value = sym.value_ptr.*;
+
+                const name_id = self.strings.get(name_str) orelse unreachable;
+
+                try writer.writeIntLittle(u32, name_id);
+                try writer.writeIntLittle(u32, value);
+            }
+        }
+
+        const import_table_pos = try self.alignData(4);
+        {
+            try writer.writeIntLittle(u32, self.imports.count());
+            var iter = self.imports.iterator();
+            while (iter.next()) |sym| {
+                const name_str = sym.key_ptr.*;
+                const value = sym.value_ptr.*;
+
+                const name_id = self.strings.get(name_str) orelse unreachable;
+
+                try writer.writeIntLittle(u32, name_id);
+                try writer.writeIntLittle(u32, value);
+            }
+        }
+
+        const relocs_table_pos = try self.alignData(4);
+        {
+            try writer.writeIntLittle(u32, @truncate(u32, self.relocs.items.len));
+            for (self.relocs.items) |reloc| {
+                try writer.writeIntLittle(u32, reloc);
+            }
+        }
+
+        const end_of_file_marker = try self.stream.getPos();
+
+        try self.stream.seekTo(4);
+
+        try writer.writeIntLittle(u32, export_table_pos); // export_table
+        try writer.writeIntLittle(u32, import_table_pos); // import_table
+        try writer.writeIntLittle(u32, relocs_table_pos); // relocs_table
+        try writer.writeIntLittle(u32, string_table_pos); // string_table
+        try writer.writeIntLittle(u32, 0x20); // section_start
+        try writer.writeIntLittle(u32, @truncate(u32, data_end_marker) - 0x20); // section_size
+
+        try self.stream.seekTo(end_of_file_marker);
+    }
+
+    fn internString(self: *Builder, string: []const u8) ![]const u8 {
+        const gop = self.strings.getOrPut(self.allocator, string);
+        if (!gop.found_existing) {
+            errdefer self.strings.remove(string);
+            const copy = try self.arena.allocator().dupe(u8, string);
+            gop.key_ptr.* = copy;
+
+            // we leave the value dangling until finalize() so we
+            // can store the string offset in the table then.
+            gop.value_ptr.* = undefined;
+        }
+        return gop.key_ptr.*;
+    }
+
+    fn alignData(self: *Builder, alignment: u32) !u32 {
+        const pos = try self.stream.getPos();
+        const aligned = @truncate(u32, std.mem.alignForward(pos, alignment));
+        try self.stream.seekTo(aligned);
+        return aligned;
+    }
+};
+
 /// A view of a SLF file. Allows accessing the data structure from a flat buffer without allocation.
 pub const View = struct {
     const offsets = struct {
@@ -238,10 +411,10 @@ pub const View = struct {
         // });
 
         // validate basic boundaries
-        if (export_table >= buffer.len - 4) return error.InvalidData;
-        if (import_table >= buffer.len - 4) return error.InvalidData;
-        if (relocs_table >= buffer.len - 4) return error.InvalidData;
-        if (string_table >= buffer.len - 4) return error.InvalidData;
+        if (export_table > buffer.len - 4) return error.InvalidData;
+        if (import_table > buffer.len - 4) return error.InvalidData;
+        if (relocs_table > buffer.len - 4) return error.InvalidData;
+        if (string_table > buffer.len - 4) return error.InvalidData;
         if (section_start + section_size > buffer.len) return error.InvalidData;
 
         const string_table_size = if (string_table != 0) blk: {
@@ -614,4 +787,77 @@ test "parse relocation table" {
     try std.testing.expectEqual(@as(?u32, 5), iter.next());
     try std.testing.expectEqual(@as(?u32, 2), iter.next());
     try std.testing.expectEqual(@as(?u32, null), iter.next());
+}
+
+const SymbolName = struct {
+    name: []const u8,
+    offset: u32,
+};
+
+fn expectSymbol(name: []const u8, offset: u32) SymbolName {
+    return SymbolName{
+        .name = name,
+        .offset = offset,
+    };
+}
+
+const SlfExpectation = struct {
+    exports: []const SymbolName = &.{},
+    imports: []const SymbolName = &.{},
+    relocs: []const u32 = &.{},
+    data: []const u8 = "",
+};
+
+fn expectSlf(dataset: []const u8, expected: SlfExpectation) !void {
+    const view = try View.init(dataset, .{});
+
+    const imports = view.imports() orelse return error.UnexpectedData;
+    const exports = view.exports() orelse return error.UnexpectedData;
+    const relocations = view.relocations() orelse return error.UnexpectedData;
+    const strings = view.strings() orelse return error.UnexpectedData;
+
+    try std.testing.expectEqual(expected.exports.len, exports.count);
+    try std.testing.expectEqual(expected.imports.len, imports.count);
+    try std.testing.expectEqual(expected.relocs.len, relocations.count);
+
+    _ = strings;
+
+    try std.testing.expectEqualStrings(expected.data, view.data());
+}
+
+test "builder api: empty builder" {
+    var buffer: [65536]u8 = undefined;
+    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
+    {
+        var builder = try Builder.init(std.testing.allocator, .@"16 bits", &source);
+        defer builder.deinit();
+
+        try builder.finalize();
+    }
+    try expectSlf(source.buffer.getWritten(), .{});
+}
+
+test "builder api: append data" {
+    var buffer: [65536]u8 = undefined;
+    var source = std.io.StreamSource{ .buffer = std.io.fixedBufferStream(&buffer) };
+    {
+        var builder = try Builder.init(std.testing.allocator, .@"16 bits", &source);
+        defer builder.deinit();
+
+        try builder.append("Hello, World!");
+
+        try builder.finalize();
+    }
+    try expectSlf(source.buffer.getWritten(), .{
+        .data = "Hello, World!",
+    });
+}
+
+fn dumpHexStream(dataset: []const u8) void {
+    var i: usize = 0;
+    while (i < dataset.len) {
+        const limit = std.math.min(16, dataset.len - i);
+        std.debug.print("{X:0>8} {}\n", .{ i, std.fmt.fmtSliceHexLower(dataset[i..][0..limit]) });
+        i += limit;
+    }
 }
