@@ -24,6 +24,14 @@ const CliOptions = struct {
     symsize: u8 = 16,
     @"align": u32 = 16,
     base: u32 = 0,
+
+    pub const shorthands = .{
+        .h = "help",
+        .o = "output",
+        .s = "symsize",
+        .a = "align",
+        .b = "base",
+    };
 };
 
 pub fn main() !u8 {
@@ -33,31 +41,31 @@ pub fn main() !u8 {
     var stderr = std.io.getStdErr().writer();
     var stdout = std.io.getStdOut().writer();
 
-    var args = args_parser.parseForCurrentProcess(CliOptions, gpa.allocator(), .print) catch return 1;
-    defer args.deinit();
+    var cli = args_parser.parseForCurrentProcess(CliOptions, gpa.allocator(), .print) catch return 1;
+    defer cli.deinit();
 
-    if (args.options.help) {
+    if (cli.options.help) {
         try printUsage(stdout);
         return 0;
     }
 
-    if (args.positionals.len == 0) {
+    if (cli.positionals.len == 0) {
         try printUsage(stderr);
         return 1;
     }
 
-    const symbol_size = std.meta.intToEnum(slf.SymbolSize, args.options.symsize / 8) catch {
-        try stderr.print("{} is not a valid symbol size.\n", .{args.options.symsize});
+    const symbol_size = std.meta.intToEnum(slf.SymbolSize, cli.options.symsize / 8) catch {
+        try stderr.print("{} is not a valid symbol size.\n", .{cli.options.symsize});
         return 1;
     };
 
-    if (!std.math.isPowerOfTwo(args.options.@"align")) {
-        try stderr.print("{} is not a power of two.\n", .{args.options.@"align"});
+    if (!std.math.isPowerOfTwo(cli.options.@"align")) {
+        try stderr.print("{} is not a power of two.\n", .{cli.options.@"align"});
         return 1;
     }
 
-    if (!std.mem.isAligned(args.options.base, args.options.@"align")) {
-        try stderr.print("{} is not aligned to {}.\n", .{ args.options.base, args.options.@"align" });
+    if (!std.mem.isAligned(cli.options.base, cli.options.@"align")) {
+        try stderr.print("{} is not aligned to {}.\n", .{ cli.options.base, cli.options.@"align" });
         return 1;
     }
 
@@ -67,7 +75,7 @@ pub fn main() !u8 {
     var arena = std.heap.ArenaAllocator.init(gpa.allocator());
     defer arena.deinit();
 
-    for (args.positionals) |file_name| {
+    for (cli.positionals) |file_name| {
         var file_data = std.fs.cwd().readFileAlloc(arena.allocator(), file_name, 1 << 30) catch |err| { // 1 GB max.
             switch (err) {
                 error.FileNotFound => try stderr.print("The file {s} does not exist.\n", .{file_name}),
@@ -85,15 +93,15 @@ pub fn main() !u8 {
         try linker.addModule(view);
     }
 
-    var result = try std.fs.cwd().createFile(args.options.output orelse "a.out", .{ .read = true });
+    var result = try std.fs.cwd().createFile(cli.options.output orelse "a.out", .{ .read = true });
     defer result.close();
 
     var stream = std.io.StreamSource{ .file = result };
 
     try linker.link(&stream, .{
         .symbol_size = symbol_size,
-        .module_alignment = args.options.@"align",
-        .base_address = args.options.base,
+        .module_alignment = cli.options.@"align",
+        .base_address = cli.options.base,
     });
 
     return 0;

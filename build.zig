@@ -11,7 +11,16 @@ pub fn build(b: *std.build.Builder) void {
 
     test_step.dependOn(&test_runner.step);
 
-    const ld = b.addExecutable("slf-ld", "src/main.zig");
+    const objdump = b.addExecutable("slf-objdump", "src/objdump.zig");
+    objdump.setTarget(target);
+    objdump.setBuildMode(mode);
+    objdump.addPackage(.{
+        .name = "args",
+        .path = .{ .path = "vendor/zig-args/args.zig" },
+    });
+    objdump.install();
+
+    const ld = b.addExecutable("slf-ld", "src/ld.zig");
     ld.setTarget(target);
     ld.setBuildMode(mode);
     ld.addPackage(.{
