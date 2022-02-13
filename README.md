@@ -4,14 +4,16 @@ SLF is a very simple object file format that can be used to link programs that d
 
 ## Project Status
 
-Highly experimental, do not use.
+**Disclaimer: Highly experimental, do not use.**
+
+The project implements a very basic object file format for 16, 32 or 64 bit architectures. It supports only pointer relocations and only a single segment and section (consider each object file a single blob).
+
+Each file can have internal references, as well as imports and exports.
+
+[Read more in the format documentation](docs/module-format.md)
 
 ### TODO
 
-- [ ] Add support for internal references
 - [ ] Add better diagnostics
   - [ ] Add support for object/file names
-- [ ] Make `slf-ld` have a better command line interface
-  - [ ] Accept files on the CLI
-  - [ ] Specify poiner size and module alignment
 - [ ] Implement `slf-objdump` to debug view `.slf` files
