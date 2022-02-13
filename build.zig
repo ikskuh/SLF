@@ -4,9 +4,11 @@ pub fn build(b: *std.build.Builder) void {
     const target = b.standardTargetOptions(.{});
     const mode = b.standardReleaseOptions();
 
+    const test_step = b.step("test", "Runs the test suite");
+    const run_step = b.step("run", "Runs the linker");
+
     const test_runner = b.addTest("src/slf.zig");
 
-    const test_step = b.step("test", "Runs the test suite");
     test_step.dependOn(&test_runner.step);
 
     const ld = b.addExecutable("slf-ld", "src/main.zig");
@@ -23,6 +25,23 @@ pub fn build(b: *std.build.Builder) void {
         link_run.addArgs(args);
     }
 
-    const run_step = b.step("run", "Runs the linker");
     run_step.dependOn(&link_run.step);
+
+    addRunTest(test_step, ld, 1, &[_][]const u8{});
+    addRunTest(test_step, ld, 0, &[_][]const u8{"--help"});
+    addRunTest(test_step, ld, 1, &[_][]const u8{"foo/bar/bam/nonexisting.slf"});
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--symsize", "4", "foo/bar/bam/nonexisting.slf" });
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--align", "2", "foo/bar/bam/nonexisting.slf" });
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--base", "5", "foo/bar/bam/nonexisting.slf" });
+}
+
+fn addRunTest(test_step: *std.build.Step, exe: *std.build.LibExeObjStep, exit_code: u8, argv: []const []const u8) void {
+    const run = exe.run();
+
+    run.addArgs(argv);
+    run.expected_exit_code = exit_code;
+    run.stdout_action = .ignore;
+    run.stderr_action = .ignore;
+
+    test_step.dependOn(&run.step);
 }
