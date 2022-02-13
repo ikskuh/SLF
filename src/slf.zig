@@ -600,16 +600,18 @@ test "parse import table" {
 
 test "parse relocation table" {
     // we overlap relocations and sections here as it doesn't do any harm
-    //                                    MMMMMMMMEEEEEEEEIIIIIIIIRRRRRRRRSSSSSSSSssssssssllllllllBB______LLLLLLLLaaaaaaaabbbbbbbb
-    const view = try View.init(hexToBits("fbadb60200000000000000002000000000000000200000000C00000002000000020000000400000005000000"), .{});
+    //                                    MMMMMMMMEEEEEEEEIIIIIIIIRRRRRRRRSSSSSSSSssssssssllllllllBB______LLLLLLLLaaaaaaaabbbbbbbbcccccccc
+    const view = try View.init(hexToBits("fbadb60200000000000000002000000000000000200000000C0000000200000003000000040000000500000002000000"), .{});
 
     const table = view.relocations() orelse return error.MissingTable;
 
     try std.testing.expectEqual(@as(u32, 4), table.get(0));
     try std.testing.expectEqual(@as(u32, 5), table.get(1));
+    try std.testing.expectEqual(@as(u32, 2), table.get(2));
 
     var iter = table.iterator();
     try std.testing.expectEqual(@as(?u32, 4), iter.next());
     try std.testing.expectEqual(@as(?u32, 5), iter.next());
+    try std.testing.expectEqual(@as(?u32, 2), iter.next());
     try std.testing.expectEqual(@as(?u32, null), iter.next());
 }
