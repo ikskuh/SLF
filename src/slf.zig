@@ -32,6 +32,8 @@ pub const Linker = struct {
         self.* = undefined;
     }
 
+    /// Adds a module to be linked.
+    /// Modules are processed in the order they are added, and can shadow symbols of previous modules.
     pub fn addModule(self: *Linker, module: View) !void {
         const ptr = try self.modules.addOne(self.allocator);
         ptr.* = Module{
@@ -40,8 +42,11 @@ pub const Linker = struct {
     }
 
     pub const LinkOptions = struct {
+        /// Align each module to this.
         module_alignment: u32 = 16,
+        /// Enforce the symbol size and reject modules that don't have this.
         symbol_size: ?SymbolSize = null,
+        /// The base address where all modules are relocated to.
         base_address: u32 = 0,
     };
     pub fn link(self: *Linker, output: *std.io.StreamSource, options: LinkOptions) !void {
