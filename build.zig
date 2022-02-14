@@ -38,10 +38,21 @@ pub fn build(b: *std.build.Builder) void {
 
     addRunTest(test_step, ld, 1, &[_][]const u8{});
     addRunTest(test_step, ld, 0, &[_][]const u8{"--help"});
-    addRunTest(test_step, ld, 1, &[_][]const u8{"foo/bar/bam/nonexisting.slf"});
-    addRunTest(test_step, ld, 1, &[_][]const u8{ "--symsize", "4", "foo/bar/bam/nonexisting.slf" });
-    addRunTest(test_step, ld, 1, &[_][]const u8{ "--align", "2", "foo/bar/bam/nonexisting.slf" });
-    addRunTest(test_step, ld, 1, &[_][]const u8{ "--base", "5", "foo/bar/bam/nonexisting.slf" });
+    addRunTest(test_step, ld, 1, &[_][]const u8{"zig-out/nonexisting.slf"});
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--symsize", "4", "zig-out/nonexisting.slf" });
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--align", "2", "zig-out/nonexisting.slf" });
+    addRunTest(test_step, ld, 1, &[_][]const u8{ "--base", "5", "zig-out/nonexisting.slf" });
+
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-x" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-x" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-i" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-e" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-s" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-r" });
+    addRunTest(test_step, objdump, 1, &[_][]const u8{ "--raw", "-d" });
+    addRunTest(test_step, objdump, 0, &[_][]const u8{"data/crt0.slf"});
+    addRunTest(test_step, objdump, 0, &[_][]const u8{ "-x", "data/crt0.slf" });
+    addRunTest(test_step, objdump, 0, &[_][]const u8{ "-x", "data/crt0.slf", "data/library.slf" });
 }
 
 fn addRunTest(test_step: *std.build.Step, exe: *std.build.LibExeObjStep, exit_code: u8, argv: []const []const u8) void {
