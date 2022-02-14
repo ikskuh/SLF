@@ -60,8 +60,8 @@ fn addRunTest(test_step: *std.build.Step, exe: *std.build.LibExeObjStep, exit_co
 
     run.addArgs(argv);
     run.expected_exit_code = exit_code;
-    run.stdout_action = .ignore;
-    run.stderr_action = .ignore;
+    // run.stdout_action = .ignore;
+    // run.stderr_action = .ignore;
 
     test_step.dependOn(&run.step);
 }
